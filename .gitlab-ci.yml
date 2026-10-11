@@ -1,0 +1,83 @@
+# Deploys the Python backend + React frontend to the Test server over SSH.
+# Setup of the server and the CI/CD variables used below: docs/test-server-runbook.md
+
+stages:
+  - test
+  - build
+  - deploy
+
+variables:
+  # Dir (inside frontend/) that `npm run build` writes to: "dist" for Vite, "build" for CRA.
+  FRONTEND_BUILD_DIR: dist
+  # CI/CD variables to define in GitLab (Settings > CI/CD > Variables), not here:
+  #   TEST_HOST, TEST_USER, DEPLOY_ROOT, APP_NAME   (variables)
+  #   SSH_PRIVATE_KEY, SSH_KNOWN_HOSTS              (type: File, NOT protected)
+  # Optional: HEALTH_URL, MIGRATE_CMD, KEEP_RELEASES, APACHE_SERVICE
+
+test:backend:
+  stage: test
+  before_script:
+    - bash scripts/check-tools.sh python3
+  script:
+    - python3 -m venv "$CI_PROJECT_DIR/.venv-ci"
+    - . "$CI_PROJECT_DIR/.venv-ci/bin/activate"
+    - pip install --quiet pytest
+    - '[ ! -f backend/requirements.txt ] || pip install --quiet -r backend/requirements.txt'
+    - cd backend
+    # exit code 5 = "no tests collected": allowed until tests exist
+    - python -m pytest || [ $? -eq 5 ]
+  after_script:
+    - rm -rf "$CI_PROJECT_DIR/.venv-ci"
+
+test:frontend:
+  stage: test
+  variables:
+    CI: "true"
+  before_script:
+    - bash scripts/check-tools.sh node npm
+  script:
+    - cd frontend
+    - npm ci
+    - npm run lint --if-present
+    - npm test --if-present
+
+build:frontend:
+  stage: build
+  before_script:
+    - bash scripts/check-tools.sh node npm
+  script:
+    - cd frontend
+    - npm ci
+    - npm run build
+  artifacts:
+    paths:
+      - frontend/$FRONTEND_BUILD_DIR/
+    expire_in: 1 week
+
+deploy:test:
+  stage: deploy
+  needs: ["build:frontend"]
+  resource_group: test-server
+  environment:
+    name: test
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      when: on_success
+    - if: '$CI_COMMIT_BRANCH'
+      when: manual
+      allow_failure: true
+  script:
+    - bash scripts/deploy.sh deploy
+
+rollback:test:
+  stage: deploy
+  needs: []
+  resource_group: test-server
+  environment:
+    name: test
+  rules:
+    - if: '$CI_COMMIT_BRANCH'
+      when: manual
+      allow_failure: true
+  script:
+    - bash scripts/deploy.sh rollback
